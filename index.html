@@ -278,9 +278,15 @@ function showProfile(user, profile) {
     setVisible('payment-area', false);
     setVisible('book-main', true);
   } else if (status === 'rejected') {
-    message('آپ کی ادائیگی کی تفصیل مسترد ہوئی ہے۔ براہِ کرم ایڈمن سے رابطہ کریں تاکہ دوبارہ جمع کرانے کی اجازت دی جاسکے۔');
-    setVisible('payment-area', false);
+    message('آپ کی سابقہ ادائیگی مسترد ہوئی ہے۔ وجہ: '+(profile.data.rejectionReason || 'ایڈمن سے رابطہ کریں')+'۔ اب درست تفصیلات اور نئی رسید جمع کرائیں۔', true);
+    setVisible('payment-area', true);
     setVisible('book-main', false);
+    $('sender-name').value = '';
+    $('payment-date').value = '';
+    $('payment-reference').value = '';
+    $('payment-receipt').required = true;
+    const oldNote=$('payment-form').querySelector('.existing-receipt-note');
+    if(oldNote) oldNote.remove();
   } else {
     message('آپ لاگ اِن ہیں: '+user.email+'۔ پروجیکٹ سپورٹ کی ادائیگی کی تفصیل جمع کرائیں؛ منظوری کے بعد کتاب کھل جائے گی۔');
     setVisible('payment-area', true);
@@ -330,7 +336,7 @@ $('payment-form').addEventListener('submit', async e => {
   const paymentDate=$('payment-date').value;
   const paymentReference=$('payment-reference').value.trim();
   const receiptFile=$('payment-receipt').files[0];
-  if (!senderName || !paymentDate || !paymentReference || (!receiptFile && !activeProfile.data.receiptImageDataUrl)) { message('براہِ کرم تمام خانے مکمل کریں اور رسید کی تصویر منتخب کریں۔',true); return; }
+  if (!senderName || !paymentDate || !paymentReference || (activeProfile.data.supportStatus === 'rejected' && !receiptFile) || (!receiptFile && !activeProfile.data.receiptImageDataUrl)) { message('براہِ کرم تمام خانے مکمل کریں اور نئی درخواست کی صورت میں نئی رسید کی تصویر لازماً منتخب کریں۔',true); return; }
   $('payment-submit').disabled=true;
   message('رسید اور ٹرانزیکشن کی انفرادیت چیک کی جا رہی ہے…');
   try {
@@ -344,17 +350,21 @@ $('payment-form').addEventListener('submit', async e => {
       const accountLockSnap=await tx.get(accountLockRef);
       if (!profileSnap.exists()) throw new Error('طالب علم کا اکاؤنٹ ریکارڈ موجود نہیں۔');
       const latest=profileSnap.data() || {};
-      if (accountLockSnap.exists() || latest.paymentSubmittedOnce || latest.paymentReference) {
-        throw new Error('اس Gmail اکاؤنٹ سے ادائیگی کی درخواست پہلے جمع ہوچکی ہے۔ ایک اکاؤنٹ سے صرف ایک درخواست جمع ہوسکتی ہے۔');
+      const isResubmission = latest.supportStatus === 'rejected';
+      if (accountLockSnap.exists() || (!isResubmission && (latest.paymentSubmittedOnce || latest.paymentReference))) {
+        throw new Error('اس Gmail اکاؤنٹ کی درخواست پہلے زیرِ التواء ہے یا اس کی دوبارہ جمع کرانے کی اجازت دستیاب نہیں۔');
+      }
+      if (latest.supportStatus !== 'pending' && !isResubmission) {
+        throw new Error('اس اکاؤنٹ کی موجودہ کیفیت میں نئی ادائیگی جمع نہیں ہوسکتی۔');
       }
       if (claimSnap.exists()) throw new Error('یہ ٹرانزیکشن نمبر پہلے کسی اکاؤنٹ میں استعمال ہوچکا ہے۔ براہِ کرم اپنی اصل رسید اور درست نمبر درج کریں۔');
       tx.set(claimRef, { uid:activeUser.uid, submittedAt:serverTimestamp() });
       tx.set(accountLockRef, { uid:activeUser.uid, email:activeUser.email, transactionClaimId:claimId, submittedAt:serverTimestamp() });
-      tx.update(activeProfile.ref, { senderName, paymentDate, paymentReference, paymentClaimId:claimId, paymentSubmittedOnce:true, paymentAmount:Number(activePaymentSettings.amount), receiptImageDataUrl, submittedAt:serverTimestamp() });
+      tx.update(activeProfile.ref, { senderName, paymentDate, paymentReference, paymentClaimId:claimId, paymentSubmittedOnce:true, paymentAmount:Number(activePaymentSettings.amount), receiptImageDataUrl, submittedAt:serverTimestamp(), supportStatus:'pending', rejectionReason:'' });
     });
     activeProfile.data={...activeProfile.data,senderName,paymentDate,paymentReference,paymentClaimId:claimId,paymentSubmittedOnce:true,paymentAmount:Number(activePaymentSettings.amount),receiptImageDataUrl};
     $('payment-receipt').required=false;
-    message('آپ کی درخواست ایک مرتبہ محفوظ ہوگئی ہے۔ اب ایڈمن مقررہ بینک اکاؤنٹ میں رقم کی تصدیق کرکے منظوری دے گا۔');
+    message('آپ کی نئی ادائیگی کی درخواست محفوظ ہوگئی ہے۔ ایڈمن بینک میں رقم کی تصدیق کرکے منظوری دے گا۔');
   } catch(err) { message('درخواست جمع نہیں ہوسکی: '+(err.message || 'نامعلوم خرابی'),true); }
   $('payment-submit').disabled=false;
 });
@@ -381,17 +391,38 @@ async function loadPending() {
       const approve=document.createElement('button'); approve.type='button'; approve.textContent='منظور کریں';
       const reject=document.createElement('button'); reject.type='button'; reject.textContent='مسترد کریں'; reject.className='reject';
       approve.addEventListener('click',()=>{ if(confirm('کیا آپ نے مقررہ بینک اکاؤنٹ میں اس ٹرانزیکشن کی اصل رقم وصول ہونے کی تصدیق کرلی ہے؟ صرف تصدیق کے بعد OK کریں۔')) reviewUser(d.id,'approved',approve,reject); });
-      reject.addEventListener('click',()=>reviewUser(d.id,'rejected',approve,reject));
+      reject.addEventListener('click',()=>{ const reason=prompt('ادائیگی مسترد کرنے کی وجہ درج کریں:'); if(reason && reason.trim()) reviewUser(d.id,'rejected',approve,reject,reason.trim()); else if(reason!==null) alert('براہِ کرم مسترد کرنے کی وجہ لکھیں۔'); });
       actions.append(approve,reject); card.appendChild(actions); list.appendChild(card);
     }
   } catch(err) { list.textContent='فہرست نہیں کھل سکی: '+err.message; }
 }
-async function reviewUser(uid,status,approve,reject) {
+async function reviewUser(uid,status,approve,reject,rejectionReason='') {
   approve.disabled=true; reject.disabled=true;
   try {
-    await updateDoc(doc(db,'users',uid),{supportStatus:status,reviewedAt:serverTimestamp(),reviewedBy:activeUser.email});
+    const userRef=doc(db,'users',uid);
+    const lockRef=doc(db,'paymentSubmissionLocks',uid);
+    await runTransaction(db, async tx => {
+      const userSnap=await tx.get(userRef);
+      const lockSnap=await tx.get(lockRef);
+      if(!userSnap.exists()) throw new Error('طالب علم کا ریکارڈ موجود نہیں۔');
+      const previous=userSnap.data() || {};
+      if(previous.supportStatus !== 'pending' || !previous.paymentReference) throw new Error('یہ درخواست اب زیرِ التواء نہیں ہے۔ فہرست تازہ کریں۔');
+      if(status === 'rejected') {
+        const historyId=uid+'_'+(previous.paymentClaimId || 'legacy_'+Date.now().toString());
+        tx.set(doc(db,'paymentSubmissionHistory',historyId), {
+          uid, email:previous.email || '', senderName:previous.senderName || '',
+          paymentDate:previous.paymentDate || '', paymentReference:previous.paymentReference || '',
+          paymentClaimId:previous.paymentClaimId || '', paymentAmount:previous.paymentAmount || 0,
+          receiptImageDataUrl:previous.receiptImageDataUrl || '',
+          submittedAt:previous.submittedAt || null, reviewedAt:serverTimestamp(),
+          reviewedBy:activeUser.email, decision:'rejected', rejectionReason
+        });
+        if(lockSnap.exists()) tx.delete(lockRef);
+      }
+      tx.update(userRef,{supportStatus:status,reviewedAt:serverTimestamp(),reviewedBy:activeUser.email,...(status === 'rejected' ? {rejectionReason} : {})});
+    });
     await loadPending();
-  } catch(err) { message('منظوری محفوظ نہیں ہوئی: '+err.message,true); approve.disabled=false; reject.disabled=false; }
+  } catch(err) { message('فیصلہ محفوظ نہیں ہوا: '+err.message,true); approve.disabled=false; reject.disabled=false; }
 }
 $('refresh-pending').addEventListener('click',loadPending);
 
